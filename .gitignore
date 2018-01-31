@@ -1,4 +1,6 @@
 *.elf
+*.o
+*.so
 *.hex
 # Created by https://www.gitignore.io/api/clion,osx,linux,jetbrains
 
