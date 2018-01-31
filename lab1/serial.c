@@ -61,19 +61,19 @@ void clear_screen() {
 }
 
 void print_int(uint16_t i) {
-  print_fmt_buf("%d", i);
+  print_fmt_buf("%hu", i);
 }
 
 void print_int32(uint32_t i) {
-  print_fmt_buf("%d", i);
+  print_fmt_buf("%lu", i);
 }
 
 void print_hex(uint16_t i) {
-  print_fmt_buf("%#x", i);
+  print_fmt_buf("%#hx", i);
 }
 
 void print_hex32(uint32_t i) {
-  print_fmt_buf("%#x", i);
+  print_fmt_buf("%#lx", i);
 }
 
 void set_color(uint8_t color) {
