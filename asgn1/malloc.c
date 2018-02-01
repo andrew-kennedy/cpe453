@@ -19,7 +19,8 @@
       const char *fmt = fmt_str; \
       int sz = snprintf(NULL, 0, fmt, __VA_ARGS__); \
       char buf[sz + 1]; \
-      snprintf(buf, sizeof buf, fmt, __VA_ARGS__); \
+      snprintf(buf, sizeof(buf), fmt, __VA_ARGS__); \
+      setvbuf(stderr, (char *)NULL, _IONBF, 0); \
       fputs(buf, stderr); \
     } \
   } while (0)
@@ -244,7 +245,8 @@ void free(void* ptr) {
         global_base = NULL;
         debug_print("Only block freed, heap list empty\n", NULL);
       }
-      // brk doesn't seem to be working on MacOS
+      // brk doesn't seem to be working on MacOS, rather the break can't be
+      // moved back down once memory has been requested
       brk(b);
       debug_print("moving brk to %p\n", sbrk(0));
     }
