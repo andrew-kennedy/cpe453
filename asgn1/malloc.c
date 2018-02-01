@@ -12,15 +12,10 @@
 #define align16(x) (((((x)-1) >> 4) << 4) + 16)
 #define align4(x) (((((x)-1) >> 2) << 2) + 4)
 
-#ifdef DEBUG_MALLOC
-#define DEBUG_TEST 1
-#else
-#define DEBUG_TEST 0
-#endif
-
+// this macro VA_ARGS trick requires gcc
 #define debug_print(fmt_str, ...) \
   do { \
-    if (DEBUG_TEST) { \
+    if (getenv("DEBUG_MALLOC")) { \
       const char *fmt = fmt_str; \
       int sz = snprintf(NULL, 0, fmt, __VA_ARGS__); \
       char buf[sz + 1]; \
@@ -46,6 +41,7 @@ void* global_base = NULL;
  * at least as large as /size/
  */
 block_meta_t find_free_block(block_meta_t* last, size_t size) {
+  debug_print("Finding free block with last=%p and size=%zu\n", last, size);
   block_meta_t current = global_base;
   while (current && !(current->free && current->size >= size)) {
     *last = current;
@@ -81,8 +77,12 @@ block_meta_t request_space(block_meta_t last, size_t size) {
   void* request = sbrk(size + META_SIZE);
   if ((int)request < 0) {
     errno = ENOMEM;
+    debug_print("request_space: failed to move break of size %zu, no memory\n",
+      size);
     return NULL; // sbrk failed.
   }
+
+  debug_print("memory break moved from %p to %p requested\n", b, sbrk(0));
 
   // last will be NULL on first request for space.
   if (last) {
@@ -121,8 +121,9 @@ block_meta_t fuse_with_next(block_meta_t block) {
   return block;
 }
 
+// return whether the pointer is within the block's size range
 bool ptr_within_block(block_meta_t block, void* ptr) {
-  return ptr >= (void*)(block + 1) && ptr < (void*)block->next;
+  return ptr >= (void*)(block + 1) && ptr < (void*)(block + 1) + block->size;
 }
 
 void* malloc(size_t size) {
@@ -147,6 +148,7 @@ void* malloc(size_t size) {
     block = find_free_block(&last, size);
     if (!block) {
       // no free blocks found
+      debug_print("no free blocks found\n", NULL);
       block = request_space(last, size);
       if (!block) {
         return NULL;
@@ -163,14 +165,16 @@ void* malloc(size_t size) {
   // return the address right ahead of the block struct
   // (keep in mind this is pointer arithmetic)
   void *p = block + 1;
-  debug_print("MALLOC: malloc(%d)     =>  (ptr=%p, size=%d)\n", size, p, block->size);
+  debug_print("MALLOC: malloc(%d)     =>  (ptr=%p, size=%d)\n", size, p,
+    block->size);
   return p;
 }
 
 void* calloc(size_t num_elems, size_t elem_size) {
   size_t size = num_elems * elem_size; // TODO: check for overflow
   void* ptr = malloc(size);
-  debug_print("MALLOC: calloc(%d, %d)  =>  (ptr=%p, size=%d)\n", num_elems, elem_size, ptr, size);
+  debug_print("MALLOC: calloc(%d, %d)  =>  (ptr=%p, size=%d)\n", num_elems,
+    elem_size, ptr, size);
   return memset(ptr, 0, size);
 }
 
@@ -178,7 +182,7 @@ void* calloc(size_t num_elems, size_t elem_size) {
 // block list in order to find which block the ptr is within.
 block_meta_t get_ptr_block(void* ptr) {
   block_meta_t b = global_base;
-  while (b->next) {
+  while (b) {
     if (ptr_within_block(b, ptr)) {
       return b;
     } else {
@@ -186,16 +190,19 @@ block_meta_t get_ptr_block(void* ptr) {
     }
   }
   // no block found that contains pointer (this shouldn't happen)
+  debug_print("NO BLOCK FOUND containing pointer (SHOULD NOT HAPPEN)\n", NULL);
   return NULL;
 }
 
 // either returns the block of the valid pointer OR NULL if the address
 // is invalid for any reason
 block_meta_t valid_addr(void* p) {
+  debug_print("checking if pointer %p is valid \n", p);
   if (global_base) {
     // malloc has been called at least once
     if (p > global_base && p < sbrk(0)) {
       // pointer is within the heap address range, see if we can find it's block
+      debug_print("pointer in valid address range, getting block\n", NULL);
       return get_ptr_block(p);
     }
   }
@@ -212,27 +219,34 @@ void free(void* ptr) {
 
   block_meta_t b = valid_addr(ptr);
   if (b) {
+    debug_print("FREEING valid ptr\n", NULL);
     // ptr was a valid address
     b->free = true;
     // attempt to fuse with previous if possible
     // NOTE: we call fuse_with_next STARTING with the previous block
     if (b->prev && b->prev->free) {
+      debug_print("PREVIOUS block detected, attempting fuse\n", NULL);
       b = fuse_with_next(b->prev);
     }
     // now see if there is a block after us and attempt to free
     if (b->next) {
+      debug_print("NEXT block detected, attempting fuse\n", NULL);
       fuse_with_next(b);
     } else {
+      debug_print("last block in heap freeing\n", NULL);
       // we are the last block in the heap, free the end of the heap
       if (b->prev) {
+        // there is a block before us, clear it's ref to us
         b->prev->next = NULL;
       } else {
-        // should only execute if we are the last block in the heap
-        // so reset the heap break to the bottom of the last block, aka
-        // it's original position pre-malloc
+        // we are the only block in heap, clear global base because
+        // nothing else remains
         global_base = NULL;
-        brk(b);
+        debug_print("Only block freed, heap list empty\n", NULL);
       }
+      // brk doesn't seem to be working on MacOS
+      brk(b);
+      debug_print("moving brk to %p\n", sbrk(0));
     }
   }
 }
@@ -278,7 +292,8 @@ void* realloc(void* ptr, size_t size) {
         memcpy(new_ptr, ptr, s);
         free(ptr);
 
-        debug_print("MALLOC: realloc(%p, %d) =>  (ptr=%p, size=%d)\n", ptr, size, new_ptr, s);
+        debug_print("MALLOC: realloc(%p, %d) =>  (ptr=%p, size=%d)\n", ptr,
+          size, new_ptr, s);
         return new_ptr;
       }
     }
