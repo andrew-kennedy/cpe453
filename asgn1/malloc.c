@@ -41,7 +41,7 @@ void* global_base = NULL;
  * see if there’s a free block that’s large enough. The returned block may
  * be far too big for what we need, this function only guarantees finding one
  * at least as large as /size/
- * RETURNS: The function returns a fitting chunk, orNULLif none where found.
+ * RETURNS: The function returns a fitting chunk, or NULL if none were found.
  * After the execution, the argument last points to the last visited chunk
  */
 block_meta_t find_free_block(block_meta_t* last, size_t size) {
@@ -154,7 +154,7 @@ block_meta_t fuse_with_next(block_meta_t block) {
 
 // return whether the pointer is within the block's size range
 bool ptr_within_block(block_meta_t block, void* ptr) {
-  return ptr >= (void*)(block + 1) && ptr < (void*)(block + 1) + block->size;
+  return ptr >= (void*)(block) && ptr < (void*)(block + 1) + block->size;
 }
 
 void* malloc(size_t size) {
@@ -233,7 +233,7 @@ block_meta_t valid_addr(void* p) {
   debug_print("checking if pointer %p is valid \n", p);
   if (global_base) {
     // malloc has been called at least once
-    if (p > global_base && p < sbrk(0)) {
+    if (p >= global_base && p <= sbrk(0)) {
       // pointer is within the heap address range, see if we can find it's block
       debug_print("pointer in valid address range, getting block\n", NULL);
       return get_ptr_block(p);
