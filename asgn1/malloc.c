@@ -83,7 +83,7 @@ size_t round_up(size_t numToRound, uint16_t multiple) {
 
 void* sbrk_round_up(size_t size) {
   void* old = sbrk(0);
-  void* request = sbrk(round_up(size, (uint16_t)SBRK_INCR));
+  void* request = sbrk(round_up(size, SBRK_INCR));
 
   if ((int)request < 0) {
     errno = ENOMEM;
@@ -101,20 +101,22 @@ void* sbrk_round_up(size_t size) {
 block_meta_t request_space(block_meta_t last, size_t size) {
   block_meta_t b;
   // save current break since we aren't totally sure where it is
-  b = sbrk(0);
+  void* old_brk = sbrk(0);
   if (last) {
     // not our first request for space
     // find address at the very end of the last malloc cell
     void* end_of_list_ptr = ((void*)(last + 1) + last->size);
 
-    if (((void*)b - end_of_list_ptr) < (META_SIZE + size)) {
+    if ((old_brk - end_of_list_ptr) < (META_SIZE + size)) {
       // no space for new cell between last cell and break, break needs to move
       // try to bump the brk up by the next multiple of SBRK_INCR
       sbrk_round_up(META_SIZE + size);
     }
+    b = (block_meta_t)end_of_list_ptr;
   } else {
     // first request for space, sbrk always has to move
     sbrk_round_up(META_SIZE + size);
+    b = old_brk;
   }
 
   // last will be NULL on first request for space.
