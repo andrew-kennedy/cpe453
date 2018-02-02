@@ -1,28 +1,29 @@
 #include <assert.h>
 #include <errno.h>
 #include <stdbool.h>
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
 #define META_SIZE sizeof(struct block_meta)
 #define MALLOC_ALIGNMENT 16
 #define MIN_BLOCK_SIZE 16
+#define SBRK_INCR 64000
 #define align16(x) (((((x)-1) >> 4) << 4) + 16)
 #define align4(x) (((((x)-1) >> 2) << 2) + 4)
 
 // this macro VA_ARGS trick requires gcc
-#define debug_print(fmt_str, ...) \
-  do { \
-    if (getenv("DEBUG_MALLOC")) { \
-      const char *fmt = fmt_str; \
-      int sz = snprintf(NULL, 0, fmt, __VA_ARGS__); \
-      char buf[sz + 1]; \
-      snprintf(buf, sizeof(buf), fmt, __VA_ARGS__); \
-      setvbuf(stderr, (char *)NULL, _IONBF, 0); \
-      fputs(buf, stderr); \
-    } \
+#define debug_print(fmt_str, ...)                                              \
+  do {                                                                         \
+    if (getenv("DEBUG_MALLOC")) {                                              \
+      const char* mc_fmt = fmt_str;                                            \
+      int mc_sz = snprintf(NULL, 0, mc_fmt, __VA_ARGS__);                      \
+      char mc_buf[mc_sz + 1];                                                  \
+      snprintf(mc_buf, sizeof(mc_buf), mc_fmt, __VA_ARGS__);                   \
+      setvbuf(stderr, (char*)NULL, _IONBF, 0);                                 \
+      fputs(mc_buf, stderr);                                                   \
+    }                                                                          \
   } while (0)
 
 typedef struct block_meta* block_meta_t;
@@ -40,11 +41,13 @@ void* global_base = NULL;
  * see if there’s a free block that’s large enough. The returned block may
  * be far too big for what we need, this function only guarantees finding one
  * at least as large as /size/
+ * RETURNS: The function returns a fitting chunk, orNULLif none where found.
+ * After the execution, the argument last points to the last visited chunk
  */
 block_meta_t find_free_block(block_meta_t* last, size_t size) {
   debug_print("Finding free block with last=%p and size=%zu\n", last, size);
   block_meta_t current = global_base;
-  while (current && !(current->free && current->size >= size)) {
+  while (current && !current->free && current->size < size) {
     *last = current;
     current = current->next;
   }
@@ -67,6 +70,30 @@ void split_block(block_meta_t block_to_split, size_t size) {
   }
 }
 
+size_t round_up(size_t numToRound, uint16_t multiple) {
+  if (multiple == 0)
+    return numToRound;
+
+  uint32_t remainder = numToRound % multiple;
+  if (remainder == 0)
+    return numToRound;
+
+  return numToRound + multiple - remainder;
+}
+
+void* sbrk_round_up(size_t size) {
+  void* old = sbrk(0);
+  void* request = sbrk(round_up(size, (uint16_t)SBRK_INCR));
+
+  if ((int)request < 0) {
+    errno = ENOMEM;
+    debug_print("request_space: failed to move break of size %zu, no memory\n",
+                size);
+    return NULL; // sbrk failed.
+  }
+  debug_print("memory break successfully moved from %p to %p\n", old, sbrk(0));
+}
+
 /* Ask for a block of space (extend heap). Request space from the OS using
  * sbrk and add our new block to the end of the linked list.
  * TODO: Don't sbrk for every single request for space
@@ -75,15 +102,20 @@ block_meta_t request_space(block_meta_t last, size_t size) {
   block_meta_t b;
   // save current break since we aren't totally sure where it is
   b = sbrk(0);
-  void* request = sbrk(size + META_SIZE);
-  if ((int)request < 0) {
-    errno = ENOMEM;
-    debug_print("request_space: failed to move break of size %zu, no memory\n",
-      size);
-    return NULL; // sbrk failed.
-  }
+  if (last) {
+    // not our first request for space
+    // find address at the very end of the last malloc cell
+    void* end_of_list_ptr = ((void*)(last + 1) + last->size);
 
-  debug_print("memory break moved from %p to %p requested\n", b, sbrk(0));
+    if (((void*)b - end_of_list_ptr) < (META_SIZE + size)) {
+      // no space for new cell between last cell and break, break needs to move
+      // try to bump the brk up by the next multiple of SBRK_INCR
+      sbrk_round_up(META_SIZE + size);
+    }
+  } else {
+    // first request for space, sbrk always has to move
+    sbrk_round_up(META_SIZE + size);
+  }
 
   // last will be NULL on first request for space.
   if (last) {
@@ -96,17 +128,6 @@ block_meta_t request_space(block_meta_t last, size_t size) {
   return b;
 }
 
-size_t round_up(size_t numToRound, uint8_t multiple) {
-  if (multiple == 0)
-    return numToRound;
-
-  uint32_t remainder = numToRound % multiple;
-  if (remainder == 0)
-    return numToRound;
-
-  return numToRound + multiple - remainder;
-}
-
 // attempt to fuse with the next block, if it exists and is free.
 // if not, returns the block given to it unmodified
 block_meta_t fuse_with_next(block_meta_t block) {
@@ -117,6 +138,13 @@ block_meta_t fuse_with_next(block_meta_t block) {
       // if there was a block after the successor, point it's previous block
       // to our current (now merged) block
       block->next->prev = block;
+    }
+  } else {
+    if (!block->next) {
+      debug_print("fuse failed, no next block, returning original\n", NULL);
+    } else {
+      debug_print("fuse failed, next block not free, returning original\n",
+                  NULL);
     }
   }
   return block;
@@ -146,6 +174,8 @@ void* malloc(size_t size) {
   } else {
     // we have previously allocated memory
     struct block_meta* last = global_base;
+    // search for a free block, also updates last to the final block in the
+    // heap in case we need to extend because no free block found
     block = find_free_block(&last, size);
     if (!block) {
       // no free blocks found
@@ -165,9 +195,9 @@ void* malloc(size_t size) {
   }
   // return the address right ahead of the block struct
   // (keep in mind this is pointer arithmetic)
-  void *p = block + 1;
+  void* p = block + 1;
   debug_print("MALLOC: malloc(%d)     =>  (ptr=%p, size=%d)\n", size, p,
-    block->size);
+              block->size);
   return p;
 }
 
@@ -175,7 +205,7 @@ void* calloc(size_t num_elems, size_t elem_size) {
   size_t size = num_elems * elem_size; // TODO: check for overflow
   void* ptr = malloc(size);
   debug_print("MALLOC: calloc(%d, %d)  =>  (ptr=%p, size=%d)\n", num_elems,
-    elem_size, ptr, size);
+              elem_size, ptr, size);
   return memset(ptr, 0, size);
 }
 
@@ -229,26 +259,25 @@ void free(void* ptr) {
       debug_print("PREVIOUS block detected, attempting fuse\n", NULL);
       b = fuse_with_next(b->prev);
     }
-    // now see if there is a block after us and attempt to free
+    // now see if there is a free block after us and attempt to fuse
     if (b->next) {
       debug_print("NEXT block detected, attempting fuse\n", NULL);
       fuse_with_next(b);
     } else {
       debug_print("last block in heap freeing\n", NULL);
-      // we are the last block in the heap, free the end of the heap
+      // we are the last block in the heap, not necessarily the only one though
       if (b->prev) {
         // there is a block before us, clear it's ref to us
         b->prev->next = NULL;
+
       } else {
         // we are the only block in heap, clear global base because
         // nothing else remains
         global_base = NULL;
         debug_print("Only block freed, heap list empty\n", NULL);
+        brk(b);
+        debug_print("moving brk to %p\n", sbrk(0));
       }
-      // brk doesn't seem to be working on MacOS, rather the break can't be
-      // moved back down once memory has been requested
-      brk(b);
-      debug_print("moving brk to %p\n", sbrk(0));
     }
   }
 }
@@ -261,30 +290,40 @@ void* realloc(void* ptr, size_t size) {
 
   block_meta_t b = valid_addr(ptr);
   if (b) {
+    debug_print("pointer valid, proceeding with realloc\n", NULL);
+    if (size == 0) {
+      free(ptr);
+      return NULL;
+    }
+
     size_t s = align16(size);
     if (b->size >= s) {
-      // we have enough space, see if we can split
+      // requested size is equal or smaller than current size
       if (b->size - s >= (META_SIZE + MIN_BLOCK_SIZE)) {
+        // if requested smaller size leaves enough room for another block,
+        // split our block
         split_block(b, s);
       }
 
     } else {
-      // requested size larger than current block, try to fuse if possible
+      // requested size larger than current block, try to fuse to get the
+      // required space if possible
       if (b->next && b->next->free &&
-          (b->size + META_SIZE + b->next->size) >= s) {
+          ((b->size + META_SIZE + b->next->size) >= s)) {
         // next block is free and provides big enough space,
         // so fuse them together
         fuse_with_next(b);
         if (b->size - s >= (META_SIZE + MIN_BLOCK_SIZE)) {
-          // if the new fused larger block has enough room for it,
-          // do a new split
+          // if the new fused larger block has enough extra space for a new
+          // empty block, do a split
           split_block(b, s);
         }
 
       } else {
         // next block can't be used because either isn't free or too small,
         // or it doesn't exist because we are at the end of the heap.
-        // Just do a standard realloc.
+        // thus we need to move our current block to the end of the heap in a
+        // new correctly sized block
         void* new_ptr = malloc(s);
         if (!new_ptr) {
           // malloc failed, you're doomed
@@ -295,7 +334,7 @@ void* realloc(void* ptr, size_t size) {
         free(ptr);
 
         debug_print("MALLOC: realloc(%p, %d) =>  (ptr=%p, size=%d)\n", ptr,
-          size, new_ptr, s);
+                    size, new_ptr, s);
         return new_ptr;
       }
     }
@@ -306,6 +345,7 @@ void* realloc(void* ptr, size_t size) {
 
   } else {
     // address invalid, can't realloc
+    debug_print("Pointer invalid or block not found", NULL);
     return NULL;
   }
 }

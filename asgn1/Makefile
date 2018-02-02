@@ -4,7 +4,7 @@ lib/libmalloc.so: lib malloc32.o
 	gcc $(CFLAGS) -std=c99 -fpic -m32 -shared -o $@ malloc32.o
 
 lib64/libmalloc.so: lib64 malloc64.o
-	gcc $(CFLAGS) -std=c99 -fpic -shared -o $@ malloc64.o
+	gcc $(CFLAGS) -std=c99 -fpic -m64 -shared -o $@ malloc64.o
 
 lib:
 	mkdir lib
