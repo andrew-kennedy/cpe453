@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -92,6 +93,7 @@ void* sbrk_round_up(size_t size) {
     return NULL; // sbrk failed.
   }
   debug_print("memory break successfully moved from %p to %p\n", old, sbrk(0));
+  return request;
 }
 
 /* Ask for a block of space (extend heap). Request space from the OS using
@@ -108,14 +110,23 @@ block_meta_t request_space(block_meta_t last, size_t size) {
     void* end_of_list_ptr = ((void*)(last + 1) + last->size);
 
     if ((old_brk - end_of_list_ptr) < (META_SIZE + size)) {
+      debug_print("no room at end of heap, extending\n", NULL);
       // no space for new cell between last cell and break, break needs to move
       // try to bump the brk up by the next multiple of SBRK_INCR
-      sbrk_round_up(META_SIZE + size);
+      if (!sbrk_round_up(META_SIZE + size)) {
+        // sbrk failed to increase
+        return NULL;
+      }
+    } else {
+      debug_print("space request fits under current break\n", NULL);
     }
     b = (block_meta_t)end_of_list_ptr;
   } else {
     // first request for space, sbrk always has to move
-    sbrk_round_up(META_SIZE + size);
+    debug_print("first request for space, moving sbrk\n", NULL);
+    if (!sbrk_round_up(META_SIZE + size)) {
+      return NULL;
+    }
     b = old_brk;
   }
 
@@ -164,11 +175,11 @@ void* malloc(size_t size) {
     return NULL;
   }
 
-  size = align16(size);
+  size_t s = align16(size);
 
   if (!global_base) {
     // first malloc call
-    block = request_space(NULL, size);
+    block = request_space(NULL, s);
     if (!block) {
       return NULL;
     }
@@ -178,19 +189,19 @@ void* malloc(size_t size) {
     struct block_meta* last = global_base;
     // search for a free block, also updates last to the final block in the
     // heap in case we need to extend because no free block found
-    block = find_free_block(&last, size);
+    block = find_free_block(&last, s);
     if (!block) {
       // no free blocks found
       debug_print("no free blocks found\n", NULL);
-      block = request_space(last, size);
+      block = request_space(last, s);
       if (!block) {
         return NULL;
       }
     } else {
       // free block found
-      if ((block->size - size) >= META_SIZE + MIN_BLOCK_SIZE) {
+      if ((block->size - s) >= META_SIZE + MIN_BLOCK_SIZE) {
         // split the block because there is room for another in the top end
-        split_block(block, size);
+        split_block(block, s);
       }
       block->free = false;
     }
@@ -233,16 +244,22 @@ block_meta_t valid_addr(void* p) {
   debug_print("checking if pointer %p is valid \n", p);
   if (global_base) {
     // malloc has been called at least once
-    if (p >= global_base && p <= sbrk(0)) {
+    void* heap_top = sbrk(0);
+    debug_print("heap_base => %p and heap_top => %p\n", global_base, heap_top);
+    if (p >= global_base && p <= heap_top) {
       // pointer is within the heap address range, see if we can find it's block
       debug_print("pointer in valid address range, getting block\n", NULL);
       return get_ptr_block(p);
     }
+    debug_print("pointer not within heap range\n", NULL);
+  } else {
+    debug_print("no global base, has malloc been called?\n", NULL);
   }
   // address was invalid
   return NULL;
 }
 
+// TODO: WHY DOES MALLOC + FREE 1MIL times fail
 void free(void* ptr) {
 
   debug_print("MALLOC: free(%p)\n", ptr);
@@ -266,37 +283,47 @@ void free(void* ptr) {
       debug_print("NEXT block detected, attempting fuse\n", NULL);
       fuse_with_next(b);
     } else {
-      debug_print("last block in heap freeing\n", NULL);
+      debug_print("end block in heap list freeing\n", NULL);
       // we are the last block in the heap, not necessarily the only one though
       if (b->prev) {
         // there is a block before us, clear it's ref to us
         b->prev->next = NULL;
 
       } else {
-        // we are the only block in heap, clear global base because
-        // nothing else remains
-        global_base = NULL;
-        debug_print("Only block freed, heap list empty\n", NULL);
-        brk(b);
-        debug_print("moving brk to %p\n", sbrk(0));
+        // we are the only block in heap
+        #if (__APPLE__ && __MACH__)
+        // leave a block in the heap for mac, since we can't move the break
+        // downwards. If we try to set global_base to NULL it will always move
+        // the break on every malloc after all frees have happened
+        debug_print("all blocks free, leaving one b/c MacOS\n", NULL);
+        #else
+        // sbrk works properly, move it downwards
+        // global_base = NULL;
+        // debug_print("Only block freed, heap list empty\n", NULL);
+        // brk(b);
+        // debug_print("moving brk to %p\n", sbrk(0));
+        #endif
       }
     }
+  } else {
+    debug_print("invalid ptr, didn't free\n", NULL);
   }
 }
 
+// TODO: WHY IS REALLOC MOVING BUFFER WHEN IT SHOULDNT
 void* realloc(void* ptr, size_t size) {
   if (!ptr) {
     // NULL ptr, realloc should act like malloc
     return malloc(size);
   }
 
+  if (size == 0) {
+    free(ptr);
+    return NULL;
+  }
   block_meta_t b = valid_addr(ptr);
   if (b) {
     debug_print("pointer valid, proceeding with realloc\n", NULL);
-    if (size == 0) {
-      free(ptr);
-      return NULL;
-    }
 
     size_t s = align16(size);
     if (b->size >= s) {

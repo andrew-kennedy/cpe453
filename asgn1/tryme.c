@@ -3,10 +3,12 @@
 #include<stdio.h>
 int main(int argc, char *argv[]) {
 
-      char *s;
+    int i, j, k;
+    i = j = k = 0;
+    while (i++ < 1000000) {
+      void *ptr = malloc(127);
+      realloc(ptr, 0);
+    }
 
-        s = strdup("Tryme");  /* should call malloc() implicitly */
-         puts(s);
-          free(s);
-           return 0;
+
 }
