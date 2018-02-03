@@ -59,7 +59,7 @@ block_meta_t find_free_block(block_meta_t* last, size_t size) {
 // the second being what remains
 void split_block(block_meta_t block_to_split, size_t size) {
   block_meta_t new;
-  new = (block_meta_t)((char*)(block_to_split + META_SIZE)) + size;
+  new = (block_meta_t)(((char*)(block_to_split + META_SIZE)) + size);
   new->size = block_to_split->size - size - META_SIZE;
   new->next = block_to_split->next;
   new->prev = block_to_split;
@@ -310,6 +310,16 @@ void free(void* ptr) {
   }
 }
 
+void copy_block(block_meta_t src, block_meta_t dst) {
+  int *sdata, *ddata;
+  size_t i;
+  sdata = (int*)(src + 1);
+  ddata = (int*)(dst + 1);
+  for (i = 0; i * 4 < src->size && i * 4 < dst->size; i++) {
+    ddata[i] = sdata[i];
+  }
+}
+
 // TODO: WHY IS REALLOC MOVING BUFFER WHEN IT SHOULDNT
 void* realloc(void* ptr, size_t size) {
   if (!ptr) {
@@ -317,7 +327,7 @@ void* realloc(void* ptr, size_t size) {
     return malloc(size);
   }
 
-  if (size == 0) {
+  if (size <= 0) {
     free(ptr);
     return NULL;
   }
@@ -359,11 +369,13 @@ void* realloc(void* ptr, size_t size) {
           errno = ENOMEM;
           return NULL;
         }
-        memcpy(new_ptr, ptr, s);
-        free(ptr);
+        block_meta_t new = get_ptr_block(new_ptr);
+        copy_block(b, new);
+
 
         debug_print("MALLOC: realloc(%p, %d) =>  (ptr=%p, size=%d)\n", ptr,
                     size, new_ptr, s);
+        free(ptr);
         return new_ptr;
       }
     }
