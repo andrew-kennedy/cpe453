@@ -14,7 +14,7 @@ OFLAGS = -O2
 #DEVICE = COM3
 
 #default target to compile the code
-program_3: program3.c os.c serial.c synchro.c
+program_3: program3.c os.c serial.c synchro.c circular_buf.c
 	$(CC) $(CFLAGS) $(AVRFLAGS) $(OFLAGS) -o main.elf $^
 	avr-objcopy -O ihex main.elf main.hex
 	avr-size main.elf

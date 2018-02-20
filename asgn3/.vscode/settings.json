@@ -3,6 +3,7 @@
     "files.associations": {
         "os.h": "c",
         "string.h": "c",
-        "globals.h": "c"
+        "globals.h": "c",
+        "synchro.h": "c"
     }
 }
