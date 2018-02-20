@@ -1,0 +1,8 @@
+{
+    "C_Cpp.intelliSenseEngineFallback": "Enabled",
+    "files.associations": {
+        "os.h": "c",
+        "string.h": "c",
+        "globals.h": "c"
+    }
+}
